@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  skola24-to-gcal:
+    build: .
+    container_name: skola24-to-gcal
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - SKOLA24_CONFIG=/app/config.yaml
+      # Alternatively, configure via environment variables:
+      # - SKOLA24_HOST=goteborg.skola24.se
+      # - SKOLA24_UNIT_GUID=your-unit-guid
+      # - SKOLA24_SELECTION=TE20A
+      # - SKOLA24_SELECTION_TYPE=0
+      # - CACHE_TTL=60
+      # - WEEKS_AHEAD=4
+      # - WEEKS_BEHIND=1

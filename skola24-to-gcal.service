@@ -1,0 +1,21 @@
+[Unit]
+Description=Skola24-to-GCal ICS Feed Server
+After=network.target
+
+[Service]
+Type=simple
+User=skola24
+Group=skola24
+WorkingDirectory=/opt/skola24-to-gcal
+ExecStart=/usr/bin/python3 /opt/skola24-to-gcal/server.py serve
+Restart=always
+RestartSec=5
+
+# Environment variables (alternative to config.yaml)
+# Environment=SKOLA24_HOST=goteborg.skola24.se
+# Environment=SKOLA24_UNIT_GUID=your-unit-guid
+# Environment=SKOLA24_SELECTION=TE20A
+# Environment=SKOLA24_SELECTION_TYPE=0
+
+[Install]
+WantedBy=multi-user.target
