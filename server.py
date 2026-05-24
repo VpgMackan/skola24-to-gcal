@@ -5,26 +5,14 @@ server.py - Main entry point for Skola24-to-GCal.
 Provides:
 1. An HTTP server that serves the schedule as an ICS feed
 2. CLI commands for discovering schools, classes, and teachers
-3. Automatic schedule refresh with configurable caching
+3. Quick config support via /user/schedule.ics paths
 
 Usage:
-    # Start the ICS feed server
     python3 server.py serve
 
-    # List available schools for a host
     python3 server.py list-schools --host it-gymnasiet.skola24.se
-
-    # List classes for a school
     python3 server.py list-classes --host it-gymnasiet.skola24.se --unit-guid <GUID>
-
-    # List teachers for a school
-    python3 server.py list-teachers --host it-gymnasiet.skola24.se --unit-guid <GUID>
-
-    # Generate example config
     python3 server.py init-config
-
-    # Fetch and print schedule (for testing)
-    python3 server.py test-fetch
 """
 
 import argparse
@@ -32,18 +20,17 @@ import json
 import logging
 import sys
 import os
+import hashlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Dict, Any, Optional, List
 
-import skola24_api
-from config import load_config, validate_config, generate_example_config
+from config import load_config, validate_config, generate_example_config, config_from_url_params, DEFAULT_CONFIG
 from schedule_fetcher import ScheduleFetcher
 
 logger = logging.getLogger("skola24-to-gcal")
 
-# Global fetcher instance
-fetcher: Optional[ScheduleFetcher] = None
+fetcher_cache: Dict[str, ScheduleFetcher] = {}
 
 
 class ICSRequestHandler(BaseHTTPRequestHandler):
@@ -55,37 +42,97 @@ class ICSRequestHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         if path in ("", "/", "/schedule", "/schedule.ics", "/calendar.ics"):
-            self._serve_ics(query)
-        elif path == "/health":
-            self._serve_health()
-        elif path == "/refresh":
-            self._serve_refresh()
-        elif path == "/info":
-            self._serve_info()
+            self.send_error(404, "Not Found. Use a quick config path like /marnie/schedule.ics or provide URL parameters.")
+        elif path.startswith("/refresh"):
+            self._serve_refresh(query)
+        elif path.startswith("/info"):
+            self._serve_info(query)
         else:
-            self.send_error(404, "Not Found")
+            self._serve_quick_config(path, query)
 
-    def _serve_ics(self, query: Dict[str, List[str]]):
-        """Serve the ICS calendar feed."""
-        try:
-            force = "refresh" in query or "force" in query
-            ics_data = fetcher.get_ics(force_refresh=force) if fetcher else ""
-            self.send_response(200)
-            self.send_header("Content-Type", "text/calendar; charset=utf-8")
-            self.send_header(
-                "Content-Disposition",
-                'attachment; filename="schedule.ics"',
-            )
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header(
-                "Cache-Control",
-                f"public, max-age={fetcher.cache_ttl if fetcher else 60}",
-            )
-            self.end_headers()
-            self.wfile.write(ics_data.encode("utf-8"))
-        except Exception as e:
-            logger.error("Error serving ICS: %s", e, exc_info=True)
-            self.send_error(500, f"Internal Server Error: {e}")
+    def _get_quick_config_name(self, path: str) -> Optional[str]:
+        """Extract quick config name from path like /marnie/schedule.ics -> marnie"""
+        parts = path.strip("/").split("/")
+        if len(parts) >= 1 and parts[0]:
+            return parts[0]
+        return None
+
+    def _get_or_create_fetcher(self, query: Dict[str, List[str]], quick_config: Optional[str] = None) -> Optional[ScheduleFetcher]:
+        """Get or create a fetcher based on URL params or quick config."""
+        config = None
+        
+        if quick_config:
+            cache_key = f"quick:{quick_config}"
+        elif query.get("user"):
+            cache_key = hashlib.md5(query["user"][0].encode()).hexdigest()[:12]
+        else:
+            return None
+        
+        if cache_key in fetcher_cache:
+            return fetcher_cache[cache_key]
+        
+        if quick_config:
+            loaded = load_config()
+            if quick_config in loaded.get("users", {}):
+                raw = loaded["users"][quick_config]
+                config = {
+                    "skola24": {
+                        "host": raw.get("host", ""),
+                        "unit_guid": raw.get("unit_guid", ""),
+                        "selection": raw.get("selection", ""),
+                        "selection_type": raw.get("selection_type", 0),
+                    },
+                    "schedule": {
+                        "weeks_ahead": raw.get("weeks_ahead", 4),
+                        "weeks_behind": raw.get("weeks_behind", 1),
+                        "cache_ttl": raw.get("cache_ttl", 60),
+                        "calendar_name": raw.get("calendar_name", ""),
+                        "color_theme": raw.get("color_theme", "purple"),
+                    },
+                }
+            else:
+                return None
+        elif query.get("user"):
+            raw = config_from_url_params(query)
+            config = {
+                "skola24": {
+                    "host": raw.get("host", ""),
+                    "unit_guid": raw.get("unit_guid", ""),
+                    "selection": raw.get("selection", ""),
+                    "selection_type": raw.get("selection_type", 0),
+                },
+                "schedule": {
+                    "weeks_ahead": raw.get("weeks_ahead", 4),
+                    "weeks_behind": raw.get("weeks_behind", 1),
+                    "cache_ttl": raw.get("cache_ttl", 60),
+                    "calendar_name": raw.get("calendar_name", ""),
+                    "color_theme": raw.get("color_theme", "purple"),
+                },
+            }
+        else:
+            return None
+        
+        errors = validate_config(config)
+        if errors:
+            logger.warning("Config validation errors: %s", errors)
+            return None
+        
+        sk = config["skola24"]
+        sched = config["schedule"]
+        
+        fetcher = ScheduleFetcher(
+            host=sk["host"],
+            unit_guid=sk["unit_guid"],
+            selection_name=sk["selection"],
+            selection_type=sk["selection_type"],
+            weeks_ahead=sched["weeks_ahead"],
+            weeks_behind=sched.get("weeks_behind", 1),
+            cache_ttl=sched["cache_ttl"],
+            calendar_name=sched.get("calendar_name", ""),
+            color_theme=sched.get("color_theme", "purple"),
+        )
+        fetcher_cache[cache_key] = fetcher
+        return fetcher
 
     def _serve_health(self):
         """Health check endpoint."""
@@ -94,9 +141,11 @@ class ICSRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps({"status": "ok"}).encode())
 
-    def _serve_refresh(self):
+    def _serve_refresh(self, query: Dict[str, List[str]]):
         """Force refresh the schedule cache."""
+        quick_config = self._get_quick_config_name(self.path)
         try:
+            fetcher = self._get_or_create_fetcher(query, quick_config)
             if fetcher:
                 fetcher.invalidate_cache()
                 ics_data = fetcher.get_ics(force_refresh=True)
@@ -112,15 +161,17 @@ class ICSRequestHandler(BaseHTTPRequestHandler):
                     ).encode()
                 )
             else:
-                self.send_error(500, "Fetcher not initialized")
+                self.send_error(400, "Invalid configuration")
         except Exception as e:
             logger.error("Error refreshing: %s", e, exc_info=True)
             self.send_error(500, f"Refresh failed: {e}")
 
-    def _serve_info(self):
+    def _serve_info(self, query: Dict[str, List[str]]):
         """Serve information about the current configuration."""
+        quick_config = self._get_quick_config_name(self.path)
+        fetcher = self._get_or_create_fetcher(query, quick_config)
         if not fetcher:
-            self.send_error(500, "Fetcher not initialized")
+            self.send_error(400, "Invalid configuration. Provide host, unit_guid, and selection params.")
             return
 
         info = {
@@ -145,6 +196,31 @@ class ICSRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(info, indent=2).encode())
 
+    def _serve_quick_config(self, path: str, query: Dict[str, List[str]]):
+        """Serve ICS for a quick config path like /marnie/schedule.ics."""
+        quick_config = self._get_quick_config_name(path)
+        if not quick_config:
+            self.send_error(404, "Not Found")
+            return
+        
+        fetcher = self._get_or_create_fetcher(query, quick_config)
+        if not fetcher:
+            self.send_error(400, f"Quick config '{quick_config}' not found in config.yaml under 'users:' section.")
+            return
+        
+        try:
+            ics_data = fetcher.get_ics()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/calendar; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="schedule.ics"')
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", f"public, max-age={fetcher.cache_ttl}")
+            self.end_headers()
+            self.wfile.write(ics_data.encode("utf-8"))
+        except Exception as e:
+            logger.error("Error serving quick config: %s", e, exc_info=True)
+            self.send_error(500, f"Internal Server Error: {e}")
+
     def log_message(self, format, *args):
         """Override to use Python logging instead of stderr."""
         logger.info(format, *args)
@@ -152,59 +228,30 @@ class ICSRequestHandler(BaseHTTPRequestHandler):
 
 def cmd_serve(config: Dict[str, Any]):
     """Start the ICS feed server."""
-    global fetcher
-
-    errors = validate_config(config)
-    if errors:
-        print("Configuration errors:")
-        for e in errors:
-            print(f"  - {e}")
-        print("\nRun 'python3 server.py init-config' to generate an example config.")
-        sys.exit(1)
-
-    sk = config["skola24"]
-    sched = config["schedule"]
-    srv = config["server"]
-
-    fetcher = ScheduleFetcher(
-        host=sk["host"],
-        unit_guid=sk["unit_guid"],
-        selection_name=sk["selection"],
-        selection_type=sk["selection_type"],
-        weeks_ahead=sched["weeks_ahead"],
-        weeks_behind=sched["weeks_behind"],
-        cache_ttl=sched["cache_ttl"],
-        calendar_name=sched.get("calendar_name", ""),
-        color_theme=sched.get("color_theme", "purple"),
-    )
-
-    host = srv["host"]
-    port = srv["port"]
-
-    sel_type_label = {
-        skola24_api.SELECTION_TYPE_CLASS: "class",
-        skola24_api.SELECTION_TYPE_TEACHER: "teacher",
-        skola24_api.SELECTION_TYPE_ROOM: "room",
-        skola24_api.SELECTION_TYPE_PERSONAL: "personal",
-    }.get(sk["selection_type"], "unknown")
+    srv = config.get("server", DEFAULT_CONFIG["server"])
+    host = srv.get("host", "0.0.0.0")
+    port = srv.get("port", 8080)
 
     server = HTTPServer((host, port), ICSRequestHandler)
     print(f"\n{'='*60}")
     print(f"  Skola24-to-GCal ICS Feed Server")
     print(f"{'='*60}")
-    print(f"  Host:       {sk['host']}")
-    print(f"  Selection:  {sk['selection']} ({sel_type_label})")
-    print(f"  Cache TTL:  {sched['cache_ttl']}s")
-    print(f"  Colors:     {sched.get('color_theme', 'purple')}")
-    print(f"  Weeks:      -{sched['weeks_behind']} to +{sched['weeks_ahead']}")
+    print(f"  Server:     http://{host}:{port}")
     print(f"{'='*60}")
-    print(f"\n  ICS Feed URL:  http://{host}:{port}/schedule.ics")
-    print(f"  Health Check:  http://{host}:{port}/health")
-    print(f"  Force Refresh: http://{host}:{port}/refresh")
-    print(f"  Server Info:   http://{host}:{port}/info")
-    print(f"\n  Add this URL to Google Calendar:")
-    print(f"  Settings > Add calendar > From URL")
-    print(f"  Paste: http://<YOUR-IP-OR-DOMAIN>:{port}/schedule.ics")
+    print(f"\n  Quick Configs (from config.yaml users: section):")
+    users = config.get("users", {})
+    for name in users:
+        print(f"    /{name}/schedule.ics")
+    print(f"\n  URL Parameters:")
+    print(f"    host           - Skola24 host domain")
+    print(f"    unit_guid      - School unit GUID")
+    print(f"    selection      - Class name, teacher ID, etc.")
+    print(f"    selection_type - 0=class, 7=teacher, 5=room, 4=personal")
+    print(f"\n  Example:")
+    print(f"    http://{host}:{port}/marnie/schedule.ics")
+    print(f"    http://{host}:{port}/schedule.ics?host=...&unit_guid=...&selection=...")
+    print(f"{'='*60}")
+    print(f"\n  Health Check:  http://{host}:{port}/health")
     print(f"\n{'='*60}")
     print(f"  Server starting on {host}:{port}...")
     print(f"  Press Ctrl+C to stop.\n")
@@ -472,6 +519,16 @@ def main():
         "test-fetch", help="Fetch and print schedule (for testing)"
     )
 
+    # Test fetch URL command
+    test_url_parser = subparsers.add_parser(
+        "test-url", help="Test fetching with URL parameters"
+    )
+    test_url_parser.add_argument("--host", required=True, help="Skola24 host domain")
+    test_url_parser.add_argument("--unit-guid", required=True, help="School unit GUID")
+    test_url_parser.add_argument("--selection", required=True, help="Class name, teacher ID, etc.")
+    test_url_parser.add_argument("--selection-type", type=int, default=0, help="Selection type (0=class, 7=teacher, 5=room, 4=personal)")
+    test_url_parser.add_argument("--user", help="User identifier (for caching)")
+
     args = parser.parse_args()
 
     # Configure logging
@@ -499,6 +556,73 @@ def main():
         cmd_init_config(args)
     elif args.command == "test-fetch":
         cmd_test_fetch(config)
+    elif args.command == "test-url":
+        cmd_test_url(args)
+
+
+def cmd_test_url(args: argparse.Namespace):
+    """Test fetching with URL-like parameters."""
+    query = {
+        "host": [args.host],
+        "unit_guid": [args.unit_guid],
+        "selection": [args.selection],
+    }
+    if args.selection_type:
+        query["selection_type"] = [str(args.selection_type)]
+    if args.user:
+        query["user"] = [args.user]
+
+    fetcher = None
+    for key, f in fetcher_cache.items():
+        test_config = {
+            "skola24": {
+                "host": f.host,
+                "unit_guid": f.unit_guid,
+                "selection": f.selection_name,
+                "selection_type": f.selection_type,
+            },
+            "schedule": {
+                "weeks_ahead": f.weeks_ahead,
+                "weeks_behind": f.weeks_behind,
+                "cache_ttl": f.cache_ttl,
+            },
+        }
+        if test_config["skola24"] == {
+            "host": args.host,
+            "unit_guid": args.unit_guid,
+            "selection": args.selection,
+            "selection_type": args.selection_type if args.selection_type is not None else 0,
+        }:
+            fetcher = f
+            break
+
+    if not fetcher:
+        config = config_from_url_params(query)
+        fetcher = ScheduleFetcher(
+            host=config["skola24"]["host"],
+            unit_guid=config["skola24"]["unit_guid"],
+            selection_name=config["skola24"]["selection"],
+            selection_type=config["skola24"]["selection_type"],
+            weeks_ahead=config["schedule"]["weeks_ahead"],
+            weeks_behind=config["schedule"]["weeks_behind"],
+            cache_ttl=config["schedule"]["cache_ttl"],
+        )
+
+    print(f"\nFetching schedule for {args.selection} ({args.host})...\n")
+    try:
+        lessons_by_week = fetcher.fetch_schedule()
+        total_lessons = sum(len(lessons) for lessons in lessons_by_week.values())
+        print(f"Successfully fetched {total_lessons} lessons.")
+        for (year, week), lessons in lessons_by_week.items():
+            print(f"  Week {week}/{year}: {len(lessons)} lessons")
+
+        ics_data = fetcher.get_ics()
+        print(f"\nGenerated ICS data (first 500 chars):\n{ics_data[:500]}...")
+
+    except Exception as e:
+        logger.error("Failed to fetch schedule: %s", e, exc_info=True)
+        print(f"\nError fetching schedule: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

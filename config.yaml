@@ -1,60 +1,22 @@
-# Skola24-to-GCal Configuration
-# ================================
+# Quick configs - access via /name/schedule.ics
+users:
+  marnie:
+    host: "it-gymnasiet.skola24.se"
+    unit_guid: "XXX"
+    selection: "TE24A"
+    selection_type: 0
+    weeks_ahead: 4
+    cache_ttl: 120
+    color_theme: "purple"
 
-# Skola24 settings
-skola24:
-  # Your school's Skola24 host domain
-  # Find this from your school's Skola24 URL
-  # Examples: "goteborg.skola24.se", "it-gymnasiet.skola24.se", "malmo.skola24.se"
-  host: "halmstad.skola24.se"
+  teacher_john:
+    host: "it-gymnasiet.skola24.se"
+    unit_guid: "YYY"
+    selection: "JW"
+    selection_type: 7
+    weeks_ahead: 6
+    color_theme: "red"
 
-  # Your school name (for display purposes)
-  school_name: "Kattegattgymnasiet"
-
-  # School unit GUID - use 'python3 server.py list-schools --host <HOST>' to find this
-  unit_guid: "ZTBiZGU1NTMtODEwOS1mYjg5LWI5ZjUtMGZmMmU1ZTNkZWU1"
-
-  # What schedule to fetch:
-  # - For a class: use the class name exactly as shown (e.g., "TE24A")
-  # - For a teacher: use the teacher's abbreviation (e.g., "JW")
-  # - For a room: use the room name (e.g., "318")
-  # - For a student: use the personnummer (YYYYMMDDXXXX)
-  selection: "GT10A"
-
-  # Selection type:
-  # 0 = class
-  # 7 = teacher
-  # 5 = room
-  # 4 = personal (personnummer)
-  selection_type: 0
-
-# Schedule fetching settings
-schedule:
-  # How many weeks ahead to include
-  weeks_ahead: 4
-
-  # How many weeks behind to include
-  weeks_behind: 1
-
-  # Cache time-to-live in seconds
-  # The schedule will be re-fetched from Skola24 after this many seconds
-  # Google Calendar typically refreshes subscriptions every few hours,
-  # but if you access the URL directly it will always be fresh
-  cache_ttl: 60
-
-  # Display name for the calendar
-  calendar_name: "School Schedule"
-
-  # Pastel color theme base for subject colors
-  # Available values: green, purple, red
-  # ("purble" is accepted as an alias for purple)
-  color_theme: "green"
-
-# HTTP server settings
 server:
   host: "0.0.0.0"
   port: 8080
-
-# Logging settings
-logging:
-  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
